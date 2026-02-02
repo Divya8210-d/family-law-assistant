@@ -59,6 +59,7 @@ def analyze_query_node(state: FamilyLawState) -> FamilyLawState:
         state["user_intent"] = response.get("user_intent")
         state["info_needed_list"] = response.get("info_needed_list", [])
         state["has_sufficient_info"] = response.get("has_sufficient_info", False)
+        state["user_gender"] = response.get("user_gender", state.get("user_gender", None))
         
         # Merge new info with existing (for updates)
         new_info = response.get("info_collected", {})

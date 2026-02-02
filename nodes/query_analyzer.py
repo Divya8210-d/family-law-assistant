@@ -10,6 +10,8 @@ This node identifies:
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict, List
+
+from sympy import use
 from state import FamilyLawState
 import os
 import json
@@ -29,21 +31,25 @@ class QueryAnalyzer:
 Your task is to:
 1. Identify the PRIMARY legal intent (what they want help with)
 2. Assess confidence in understanding their intent (high/medium/low)
-3. Extract what information the user HAS PROVIDED(like user's gender, dates, relationships, incidents, religion for matrimonial problems etc.)
-4. Identify what the most CRITICAL information is STILL NEEDED (like specific dates, victim's gender, religion for matrimonial problems, relationships, incidents) to answer their query without making assumptions
-5. It is compulsory that you need the geneder of the messaging person to give accurate legal advice.
+3. Identify the gender of the user asking the query, if not provided, mark as "unknown" and add it to info_needed at first
+4. Extract what information the user HAS PROVIDED(like DATES, relationships, incidents, RELIGION for marital or matrimonial problems etc.)
+5. Identify what the most CRITICAL information is STILL NEEDED (like specific DATES, RELIGION for marital or matrimonial problems, relationships, incidents) to answer their query without making assumptions
+6. It is compulsory that you need client's gender to give accurate legal advice.
+7. Identify the client's religion if the query is related to marriage, divorce, maintenance, custody, dowry etc.
+8. Cross check whether the fields in info_needed are very critical info needed to answer the query
 
 RESPONSE FORMAT (Strictly JSON only, no other text):
 {{
   "user_intent": "brief description of what user wants to achieve",
+  "user_gender": "male|female|other|unknown",
   "intent_confidence": "high|medium|low",
   "info_provided": {{
-    "detailed_key1": "value1",
-    "detailed_key2": "value2"
+    "detailed_collected_info_key1": "value1",
+    "detailed_collected_info_key2": "value2"
   }},
   "info_needed": [
-    "detailed_info_1",
-    "detailed_info_2"
+    "detailed_needed_info_1",
+    "detailed_needed_info_2"
   ]
 }}
 
@@ -118,19 +124,22 @@ ANALYSIS (JSON only):"""
             intent_confidence = analysis.get("intent_confidence", "medium")
             info_provided = analysis.get("info_provided", {})
             info_needed = analysis.get("info_needed", [])
+            user_gender = analysis.get("user_gender", None)
             
             # Determine if we have sufficient info
             has_sufficient_info = len(info_needed) == 0 and len(info_provided) > 0
             
             logger.info(f"Query analysis: intent_confidence={intent_confidence}, "
-                       f"user_type={user_intent}, needs={len(info_needed)} items")
+                       f"user_type={user_intent}, needs={len(info_needed)} items,"
+                       f"gender={user_gender}")
             
             return {
                 "user_intent": user_intent,
                 "intent_confidence": intent_confidence,
                 "info_collected": info_provided,
                 "info_needed_list": info_needed,
-                "has_sufficient_info": has_sufficient_info
+                "has_sufficient_info": has_sufficient_info,
+                "user_gender": user_gender
             }
         
         except json.JSONDecodeError as e:

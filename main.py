@@ -465,6 +465,7 @@ def save_history(conversation_id: str, messages: List, state: dict) -> bool:
             "messages": serializable_messages,
             "state": {
                 "root_query": state.get("root_query", ""),
+                "user_gender": state.get("user_gender", None),
                 "user_intent": state.get("user_intent"),
                 "in_gathering_phase": state.get("in_gathering_phase", False),
                 "info_collected": state.get("info_collected", {}),
@@ -524,6 +525,7 @@ async def chat_stream(request: Request, query_request: QueryRequest):
                 "conversation_id": conversation_id,
                 
                 # Restore previous state
+                "user_gender": previous_state.get("user_gender", None),
                 "root_query": previous_state.get("root_query", ""),
                 "user_intent": previous_state.get("user_intent", ""),
                 "analysis_complete": previous_state.get("analysis_complete", False),

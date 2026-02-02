@@ -104,6 +104,7 @@ def generate_response(state: FamilyLawState) -> Dict:
     user_intent = state.get("user_intent", "legal advice")
     include_prediction = state.get("include_prediction", True)
     include_reasoning = state.get("include_reasoning", True)
+    gender = state.get("user_gender", "unknown")
     
     # Validate we have information
     if not retrieved_chunks:
@@ -130,8 +131,10 @@ def generate_response(state: FamilyLawState) -> Dict:
 
 {case_information}
 
+Legal Context:
 {legal_context}
 
+CLIENT GENDER: {gender}
 CLIENT QUERY: {query}
 
 Provide a COMPLETE, well-structured response with:
@@ -141,6 +144,7 @@ Provide a COMPLETE, well-structured response with:
 - Give concise response to ensure a Flesch Reading Ease score of atleast 55+.
 - Explain legal terms briefly in everyday language when necessary.
 - Give practical guidance wherever possible, focusing on what a person can realistically do.
+- Cite relevant legal provisions and precedents appropriately from the necessary legal context.
 
 Use empathetic, professional, simple language. Be thorough - this is important for the client's case.
 

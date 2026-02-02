@@ -10,6 +10,7 @@ class FamilyLawState(MessagesState):
     
     # User query
     query: str
+    user_gender: Optional[str] = None
     
     # Analysis phase
     root_query: Optional[str] = None

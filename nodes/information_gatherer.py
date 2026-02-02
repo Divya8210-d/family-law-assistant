@@ -13,6 +13,7 @@ import os
 import json
 import logging
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from torch import ge
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,9 @@ class InformationGatherer:
     QUESTION_GENERATION_PROMPT = """You are a compassionate Indian FAMILY LAW attorney conducting a client consultation.
 
 SITUATION:
-- User's Query: {root_query}
-- User Intent: {user_intent}
+- Client's Query: {root_query}
+- Client's Intent: {user_intent}
+- Client's Gender: {gender}
 - Information already collected: {info_collected}
 - Next information needed: {current_target}
 
@@ -34,42 +36,88 @@ YOUR TASK:
 Ask ONE clear, empathetic question to gather: {current_target}
 
 CRITICAL RULES:
-1. If user's gender is already known, DO NOT ask about it again
+1. If client's gender is already known, DO NOT ask about it again
 2. Ask ONLY about {current_target} that support the case - be specific and direct
-3. Use simple, clear language
+3. Be empathetic and professional. Use simple, clear language
 4. Reference previously collected information naturally
 
 YOUR QUESTION:"""
 
-    ANSWER_EXTRACTION_PROMPT = """Extract ONLY the direct answer to the question from the user's response.
+#     ANSWER_EXTRACTION_PROMPT = """Extract ONLY the answer to the question from the user's response.
 
-QUESTION ASKED: {last_question}
-USER'S RESPONSE: {user_response}
+# QUESTION ASKED: {last_question}
+# USER'S RESPONSE: {user_response}
+
+# EXTRACTION RULES:
+# 1. If the user directly answers the question, extract that answer
+# 2. Be concise - extract only the relevant part
+# 3. If user says "yes", "no", "I am", single word, etc., extract the actual answer (e.g., "yes" → "female") and generate comprehensive answer based on the question and context
+# 4. If user provides no relevant answer, return "NOT_PROVIDED"
+# 5. Generate a compact answer based on the user's response and the question asked
+
+# EXAMPLES:
+# Q: "Are you the husband or wife in this marriage?"
+# Response: "I am the wife" → Extract: "wife"
+
+# Q: "What is your gender?"
+# Response: "female" → Extract: "female"
+
+# Q: "When did you get married?"
+# Response: "We got married in 2020" → Extract: "2020"
+
+# Response: "I don't remember" → Extract: "NOT_PROVIDED"
+
+# NOW EXTRACT:
+# Response (JSON only, no other text):
+# {{
+#     "extracted_answer": "the comprehensive generated answer based on user response OR NOT_PROVIDED",
+# }}"""
+
+    ANSWER_EXTRACTION_PROMPT = """You are extracting structured information from a client interview.
+
+QUESTION ASKED:
+{last_question}
+
+USER RESPONSE:
+{user_response}
+
+YOUR TASK:
+Extract the answer to the question in a SLIGHTLY DESCRIPTIVE way.
 
 EXTRACTION RULES:
-1. If the user directly answers the question, extract that answer
-2. Be concise - extract only the relevant part
-3. If user says "yes", "no", "I am", etc., extract the actual answer (e.g., "yes" → "female") and generate comprehensive answer based on the question and context
-4. If user provides no relevant answer, return "NOT_PROVIDED"
-5. DO NOT add extra context or interpretations
+1. If the user answers directly, rewrite it as a clear, complete sentence.
+2. Preserve important details such as time, place, duration, reasons, or conditions.
+3. Do NOT add new facts or assumptions.
+4. If the response is very short ("yes", "no", "I am"), expand it using the question context.
+5. If the user does not provide relevant information, return "NOT_PROVIDED".
+
+STYLE GUIDELINES:
+- 3 - 5 words minimum
+- 15–20 words maximum
+- Clear and factual
+- No legal conclusions
+- No advice
 
 EXAMPLES:
-Q: "Are you the husband or wife in this marriage?"
-Response: "I am the wife" → Extract: "wife"
-
-Q: "What is your gender?"
-Response: "female" → Extract: "female"
 
 Q: "When did you get married?"
-Response: "We got married in 2020" → Extract: "2020"
+Response: "In 2020"
+→ "The marriage took place in the year 2020."
 
-Response: "I don't remember" → Extract: "NOT_PROVIDED"
+Q: "Are you the husband or wife?"
+Response: "wife"
+→ "The client stated that she is the wife."
 
-NOW EXTRACT:
+Q: "Have you been living separately?"
+Response: "Since last year due to constant fights"
+→ "The parties have been living separately since last year due to ongoing conflicts."
+
 Response (JSON only, no other text):
 {{
-    "extracted_answer": "the comprehensive generated answer based on user responseOR NOT_PROVIDED"
-}}"""
+  "extracted_answer": "the comprehensive generated answer based on user response OR NOT_PROVIDED"
+}}
+"""
+
     
     def __init__(self, huggingface_api_key: str = None):
         """Initialize the InformationGatherer with LLM."""
@@ -96,6 +144,7 @@ Response (JSON only, no other text):
         info_needed_list = list(state.get("info_needed_list", []))
         user_intent = state.get("user_intent", "legal advice")
         gathering_step = state.get("gathering_step", 0)
+        gender = state.get("user_gender", "unknown")
         
         logger.info(f"=== Gathering Step {gathering_step} ===")
         logger.info(f"Info needed: {info_needed_list}")
@@ -131,6 +180,7 @@ Response (JSON only, no other text):
                     if current_target == "user_gender":
                         extracted = self._normalize_gender(extracted)
                         info_collected["user_gender"] = extracted
+                        state["user_gender"] = extracted
                         logger.info(f"✓ Gender identified and stored: {extracted}")
                     else:
                         info_collected[current_target] = extracted
@@ -160,7 +210,7 @@ Response (JSON only, no other text):
         next_target = info_needed_list[0]
         
         # Skip if gender already collected
-        if next_target == "user_gender" and "user_gender" in info_collected:
+        if next_target == "user_gender" and state.get("gender") != "unknown":
             logger.info("Gender already known, skipping...")
             info_needed_list.remove("user_gender")
             if not info_needed_list:
@@ -176,6 +226,7 @@ Response (JSON only, no other text):
         logger.info(f"Generating question for: {next_target}")
         
         next_question = self._generate_question(
+            gender=gender,
             root_query=root_query,
             user_intent=user_intent,
             info_collected=info_collected,
@@ -214,6 +265,7 @@ Response (JSON only, no other text):
     
     def _generate_question(
         self,
+        gender: str,
         root_query: str,
         user_intent: str,
         info_collected: Dict,
@@ -225,6 +277,7 @@ Response (JSON only, no other text):
         collected_str = self._format_info_collected(info_collected)
         
         prompt = self.QUESTION_GENERATION_PROMPT.format(
+            gender=gender,
             root_query=root_query,
             user_intent=user_intent.replace("_", " ").title(),
             info_collected=collected_str or "None yet",

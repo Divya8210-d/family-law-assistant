@@ -115,11 +115,11 @@ const LegalAssistChat: React.FC = () => {
       const data = await res.json();
       setCurrentThreadId(threadId);
       
-      // *** CRITICAL FIX: Map messages with their reasoning/precedents ***
+      // Load messages with reasoning/precedents FROM STATE
       const savedMessages = data.messages || [];
       const savedState = data.state || {};
       
-      // Get saved reasoning and precedent explanations FROM STATE
+      // Get saved reasoning and precedent explanations
       const savedReasoning = savedState.reasoning_steps || [];
       const savedPrecedents = savedState.precedent_explanations || [];
       const savedInfoCollected = savedState.info_collected || {};
@@ -132,25 +132,34 @@ const LegalAssistChat: React.FC = () => {
       });
       
       const formattedMessages: Message[] = savedMessages.map((msg: any, idx: number) => {
+        // *** CRITICAL FIX: Clean the message content ***
+        let content = msg.content || '';
+        
+        // Remove extraction JSON that appears at start of AI messages
+        if (msg.role === 'AIMessage' && content.includes('{"extracted_answer"')) {
+          const jsonMatch = content.match(/^\s*\{[^}]*"extracted_answer"[^}]*\}/);
+          if (jsonMatch) {
+            content = content.replace(jsonMatch[0], '').trim();
+            console.log('✅ Cleaned extraction JSON from message', idx);
+          }
+        }
+        
         // Find the LAST assistant message (final response)
         const isLastAssistantMsg = msg.role === 'AIMessage' && 
                                     idx === savedMessages.length - 1;
         
         const message: Message = {
           role: msg.role === 'HumanMessage' ? 'user' : 'assistant',
-          content: msg.content,
+          content: content,
           timestamp: new Date(),
         };
         
-        // *** Attach reasoning to LAST assistant message only ***
+        // Attach reasoning to LAST assistant message only
         if (isLastAssistantMsg && savedReasoning.length > 0) {
           message.reasoningSteps = savedReasoning;
           message.precedentExplanations = savedPrecedents;
           message.messageType = 'final_response';
-          console.log('✅ Attached reasoning to message', idx, {
-            reasoning: savedReasoning.length,
-            precedents: savedPrecedents.length
-          });
+          console.log('✅ Attached reasoning to message', idx);
         } else if (msg.role === 'AIMessage') {
           // Check if this is a gathering message
           const isGatheringMsg = savedState.in_gathering_phase || 
@@ -539,7 +548,7 @@ const LegalAssistChat: React.FC = () => {
     );
   };
 
-  // *** Component that shows collected info - receives props to control display ***
+  // Component that shows collected info - receives props to control display
   const InfoCollectedSummary: React.FC<{ collectedInfo: Record<string, string> }> = ({ collectedInfo }) => {
     if (!collectedInfo || Object.keys(collectedInfo).length === 0) return null;
     
@@ -733,17 +742,18 @@ const LegalAssistChat: React.FC = () => {
           )}
 
           {messages.map((msg, idx) => {
-            // *** FIND WHERE TO INSERT INFO SUMMARY ***
-            // Look for: last gathering message followed by final response
+            // *** CRITICAL FIX: Determine where to show info summary ***
             const isGatheringMessage = msg.messageType === 'information_gathering';
             const nextMessage = idx < messages.length - 1 ? messages[idx + 1] : null;
             const nextIsFinalResponse = nextMessage?.messageType === 'final_response';
             
-            // Show info summary AFTER last gathering message, BEFORE final response
-            const showInfoSummaryAfterThis = isGatheringMessage && nextIsFinalResponse;
+            // Show summary AFTER last gathering message, BEFORE final response
+            const showInfoSummaryAfter = isGatheringMessage && nextIsFinalResponse;
             
-            // Get info to display (from message or from state)
-            const infoToDisplay = msg.infoCollected || (showInfoSummaryAfterThis ? infoCollected : null);
+            // Get info to display
+            const infoToDisplay = showInfoSummaryAfter 
+              ? (msg.infoCollected || infoCollected)
+              : null;
             
             return (
               <React.Fragment key={idx}>
@@ -815,8 +825,8 @@ const LegalAssistChat: React.FC = () => {
                 </div>
                 
                 {/* *** Show Info Summary AFTER last gathering, BEFORE final response *** */}
-                {showInfoSummaryAfterThis && infoToDisplay && Object.keys(infoToDisplay).length > 0 && (
-                  <div className="animate-fade-in my-4">
+                {showInfoSummaryAfter && infoToDisplay && Object.keys(infoToDisplay).length > 0 && (
+                  <div className="animate-fade-in my-4 max-w-4xl">
                     <InfoCollectedSummary collectedInfo={infoToDisplay} />
                   </div>
                 )}
