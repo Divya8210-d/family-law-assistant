@@ -367,6 +367,7 @@ async def chat_stream(
                 "retrieved_chunks":   [],
                 "sources":            [],
                 "message_type":       None,
+                "name": current_user.full_name,
             }
 
             yield f"data: {json.dumps({'type': 'metadata', 'thread_id': thread_id})}\n\n"
@@ -618,6 +619,7 @@ async def health_check():
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
+    
     uvicorn.run(
         "main:app",
         host=settings.api_host,

@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     # ── Server ────────────────────────────────────────────────────────────────
     api_host: str       = Field(default="0.0.0.0", env="API_HOST")
     api_port: int       = Field(default=8000,       env="API_PORT")
+    milvus_uri: str
+    milvus_token: str
     cors_origins: list[str] = Field(
         default=["http://localhost:3000", "http://localhost:3001"],
         env="CORS_ORIGINS",

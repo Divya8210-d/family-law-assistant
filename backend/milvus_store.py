@@ -1,127 +1,114 @@
 import os
 import json
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
+from pymilvus import MilvusClient, DataType
 from tqdm import tqdm
+import dotenv
 
-# Configuration
-MILVUS_HOST = "localhost"
-MILVUS_PORT = "19530"
+dotenv.load_dotenv()
+
+# ================= CONFIG =================
 COLLECTION_NAME = "family_law_cases"
 EMBEDDINGS_DIR = "./data/embeddings"
-EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 dimension
+EMBEDDING_DIM = 384
 
+milvus_uri = os.getenv("MILVUS_URI")
+token = os.getenv("MILVUS_TOKEN")
+
+# ================= CONNECT =================
 def connect_milvus():
-    """Connect to Milvus standalone."""
-    connections.connect(
-        alias="default",
-        host=MILVUS_HOST,
-        port=MILVUS_PORT
+    client = MilvusClient(uri=milvus_uri, token=token)
+    print(f"✅ Connected to Milvus at {milvus_uri}")
+    return client
+
+# ================= CREATE COLLECTION =================
+def create_collection(client):
+    if client.has_collection(COLLECTION_NAME):
+        print(f"⚠️ Dropping existing collection '{COLLECTION_NAME}'...")
+        client.drop_collection(COLLECTION_NAME)
+
+    # Schema
+    schema = client.create_schema()
+
+    schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+    schema.add_field("chunk_id", DataType.INT64)
+    schema.add_field("content", DataType.VARCHAR, max_length=65535)
+    schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM)
+    schema.add_field("parent_id", DataType.INT64)
+    schema.add_field("title", DataType.VARCHAR, max_length=1000)
+    schema.add_field("query_text", DataType.VARCHAR, max_length=10000)
+    schema.add_field("url", DataType.VARCHAR, max_length=1000)
+    schema.add_field("category", DataType.VARCHAR, max_length=100)
+
+    # Index
+    index_params = client.prepare_index_params()
+    index_params.add_index(
+        field_name="embedding",
+        metric_type="COSINE"
     )
-    print(f"✅ Connected to Milvus at {MILVUS_HOST}:{MILVUS_PORT}")
 
-def create_collection():
-    """Create Milvus collection with schema."""
-    if utility.has_collection(COLLECTION_NAME):
-        print(f"⚠️  Collection '{COLLECTION_NAME}' already exists. Dropping it...")
-        utility.drop_collection(COLLECTION_NAME)
-    
-    # Define schema
-    fields = [
-        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-        FieldSchema(name="chunk_id", dtype=DataType.INT64),
-        FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
-        FieldSchema(name="parent_id", dtype=DataType.INT64),
-        FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=1000),
-        FieldSchema(name="query_text", dtype=DataType.VARCHAR, max_length=10000),
-        FieldSchema(name="url", dtype=DataType.VARCHAR, max_length=1000),
-        FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=100)
-    ]
-    
-    schema = CollectionSchema(fields=fields, description="Family Law Cases RAG")
-    collection = Collection(name=COLLECTION_NAME, schema=schema)
-    
-    # Create index
-    index_params = {
-        "metric_type": "COSINE",
-        "index_type": "IVF_FLAT",
-        "params": {"nlist": 128}
-    }
-    collection.create_index(field_name="embedding", index_params=index_params)
-    print(f"✅ Collection '{COLLECTION_NAME}' created with index")
-    
-    return collection
+    client.create_collection(
+        COLLECTION_NAME,
+        schema=schema,
+        index_params=index_params
+    )
 
-def insert_embeddings(collection):
-    """Insert all embeddings into Milvus."""
+    print(f"✅ Collection '{COLLECTION_NAME}' created")
+
+# ================= INSERT =================
+def insert_embeddings(client):
     embedding_files = [f for f in os.listdir(EMBEDDINGS_DIR) if f.endswith("_embeddings.json")]
-    
+
     if not embedding_files:
-        print("❌ No embedding files found. Run embedding.py first.")
+        print("❌ No embedding files found.")
         return
-    
+
     total_inserted = 0
-    
+
     for filename in embedding_files:
         category = filename.replace("_embeddings.json", "")
         file_path = os.path.join(EMBEDDINGS_DIR, filename)
-        
+
         with open(file_path, "r", encoding="utf-8") as f:
             chunks = json.load(f)
-        
+
         print(f"\n📤 Inserting {len(chunks)} chunks from {category}")
-        
-        # Prepare data
-        chunk_ids = []
-        contents = []
-        embeddings = []
-        parent_ids = []
-        titles = []
-        query_texts = []
-        urls = []
-        categories = []
-        
-        for chunk in tqdm(chunks, desc=f"Preparing {category}"):
-            chunk_ids.append(chunk["id"])
-            contents.append(chunk["content"][:65535])  # Truncate if needed
-            embeddings.append(chunk["embedding"])
-            parent_ids.append(chunk["metadata"]["parent_id"])
-            titles.append(chunk["metadata"]["title"][:1000])
-            query_texts.append(chunk["metadata"]["query-text"][:10000])
-            urls.append(chunk["metadata"].get("url", "")[:1000])
-            categories.append(category)
-        
-        # Insert in batches
+
+        rows = []
+
+        for chunk in tqdm(chunks):
+            row = {
+                "chunk_id": chunk["id"],
+                "content": chunk["content"][:65535],
+                "embedding": chunk["embedding"],
+                "parent_id": chunk["metadata"]["parent_id"],
+                "title": chunk["metadata"]["title"][:1000],
+                "query_text": chunk["metadata"]["query-text"][:10000],
+                "url": chunk["metadata"].get("url", "")[:1000],
+                "category": category
+            }
+            rows.append(row)
+
+        # Batch insert
         batch_size = 100
-        for i in range(0, len(chunk_ids), batch_size):
-            batch_data = [
-                chunk_ids[i:i+batch_size],
-                contents[i:i+batch_size],
-                embeddings[i:i+batch_size],
-                parent_ids[i:i+batch_size],
-                titles[i:i+batch_size],
-                query_texts[i:i+batch_size],
-                urls[i:i+batch_size],
-                categories[i:i+batch_size]
-            ]
-            collection.insert(batch_data)
-        
-        total_inserted += len(chunks)
-        print(f"✅ Inserted {len(chunks)} chunks from {category}")
-    
-    collection.flush()
-    print(f"\n🎯 Total {total_inserted} chunks inserted into Milvus")
+        for i in range(0, len(rows), batch_size):
+            client.insert(COLLECTION_NAME, rows[i:i+batch_size])
 
-def load_collection():
-    """Load collection into memory."""
-    collection = Collection(COLLECTION_NAME)
-    collection.load()
-    print(f"✅ Collection '{COLLECTION_NAME}' loaded into memory")
-    return collection
+        total_inserted += len(rows)
+        print(f"✅ Inserted {len(rows)} chunks")
 
+    client.flush(COLLECTION_NAME)
+    print(f"\n🎯 Total inserted: {total_inserted}")
+
+# ================= LOAD =================
+def load_collection(client):
+    client.load_collection(COLLECTION_NAME)
+    print(f"✅ Collection loaded into memory")
+
+# ================= MAIN =================
 if __name__ == "__main__":
-    connect_milvus()
-    collection = create_collection()
-    insert_embeddings(collection)
-    load_collection()
+    client = connect_milvus()
+    create_collection(client)
+    insert_embeddings(client)
+    load_collection(client)
+
     print("\n✨ Milvus setup complete!")
