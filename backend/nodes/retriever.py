@@ -3,7 +3,7 @@ from pymilvus import connections, Collection
 from sentence_transformers import SentenceTransformer
 from typing import Dict
 from state import FamilyLawState
-
+import os
 # Configuration
 MILVUS_HOST = "localhost"
 MILVUS_PORT = "19530"
@@ -13,11 +13,17 @@ TOP_K = 5
 
 # Initialize model (loaded once)
 model = SentenceTransformer(MODEL_NAME)
+MILVUS_URI = os.getenv("MILVUS_URI")
+MILVUS_TOKEN = os.getenv("MILVUS_TOKEN")
 
 def connect_and_load():
-    """Connect to Milvus and load collection."""
+    """Connect to Milvus using URI + token and load collection."""
     try:
-        connections.connect(alias="default", host=MILVUS_HOST, port=MILVUS_PORT)
+        connections.connect(
+            alias="default",
+            uri=MILVUS_URI,
+            token=MILVUS_TOKEN
+        )
         collection = Collection(COLLECTION_NAME)
         collection.load()
         return collection
