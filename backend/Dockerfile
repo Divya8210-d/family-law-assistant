@@ -20,10 +20,11 @@ RUN pip install --no-cache-dir uv
 ENV UV_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 # Copy dependency files first (Docker layer caching)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 
 # Install production dependencies only
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --no-dev --no-editable
+
 
 # ── Stage 2: Runtime ─────────────────────────
 FROM python:3.11-slim
