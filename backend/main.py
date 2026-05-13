@@ -101,6 +101,9 @@ async def lifespan(app: FastAPI):
     # AsyncPostgresSaver needs the plain psycopg3 DSN (not asyncpg).
     # Convert: postgresql+asyncpg://... → postgresql://...
     pg_dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    # Neon requires SSL; asyncpg defaults to SSL but psycopg3 does not.
+    if "sslmode" not in pg_dsn:
+        pg_dsn += ("&" if "?" in pg_dsn else "?") + "sslmode=require"
 
     # Build a resilient connection pool that handles Neon serverless idle
     # timeouts.  'max_idle' ensures stale connections are recycled, and
