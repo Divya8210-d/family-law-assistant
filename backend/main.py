@@ -106,30 +106,61 @@ async def lifespan(app: FastAPI):
         pg_dsn += ("&" if "?" in pg_dsn else "?") + "sslmode=require"
 
     # Build a resilient connection pool that handles Neon serverless idle
-    # timeouts.  'max_idle' ensures stale connections are recycled.
+    # timeouts.  'check' validates each connection before handing it to
+    # callers — this is the psycopg equivalent of SQLAlchemy's
+    # pool_pre_ping=True, and is WHY auth (SQLAlchemy) keeps working
+    # while the checkpointer (psycopg) doesn't without it.
     # NOTE: Neon's pooled endpoint does NOT support tcp_keepalives_* via
     # the 'options' startup parameter, so we use psycopg's native
     # keepalives_idle/keepalives_interval/keepalives_count kwargs instead.
     pool_kwargs = dict(
         conninfo=pg_dsn,
-        min_size=2,
+        min_size=1,
         max_size=10,
-        max_idle=300,        # recycle idle connections every 5 min
+        max_idle=120,        # recycle idle connections every 2 min
+        # THIS IS THE KEY FIX: ping connection before each checkout
+        check=AsyncConnectionPool.check_connection,
         kwargs={
             "autocommit": True,
             "prepare_threshold": 0,
             # TCP keepalive via libpq parameters (not startup options)
             "keepalives": 1,
-            "keepalives_idle": 60,
-            "keepalives_interval": 15,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
             "keepalives_count": 4,
         },
     )
 
+    from psycopg import OperationalError
+
+    class ResilientPostgresSaver(AsyncPostgresSaver):
+        """Wraps AsyncPostgresSaver to add a 1-time retry on DB connection drops."""
+        
+        async def aget_tuple(self, config):
+            try:
+                return await super().aget_tuple(config)
+            except OperationalError as e:
+                logger.warning(f"DB OperationalError in aget_tuple, retrying: {e}")
+                return await super().aget_tuple(config)
+                
+        async def aput(self, config, checkpoint, metadata, new_versions):
+            try:
+                return await super().aput(config, checkpoint, metadata, new_versions)
+            except OperationalError as e:
+                logger.warning(f"DB OperationalError in aput, retrying: {e}")
+                return await super().aput(config, checkpoint, metadata, new_versions)
+                
+        async def aput_writes(self, config, writes, task_id):
+            try:
+                return await super().aput_writes(config, writes, task_id)
+            except OperationalError as e:
+                logger.warning(f"DB OperationalError in aput_writes, retrying: {e}")
+                return await super().aput_writes(config, writes, task_id)
+
     async with AsyncConnectionPool(**pool_kwargs) as pool:
-        checkpointer = AsyncPostgresSaver(pool)
+        checkpointer = ResilientPostgresSaver(pool)
         await checkpointer.setup()
-        logger.info("✅ LangGraph checkpointer tables ready (resilient pool)")
+        logger.info("✅ LangGraph checkpointer tables ready (resilient pool with retry)")
 
         # 3. Compile graph
         app.state.family_law_app = await create_graph(checkpointer)
