@@ -92,12 +92,13 @@ const LegalAssistChat: React.FC = () => {
     // Auth check on mount — check both localStorage and sessionStorage
     const token = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token');
     const userStr = localStorage.getItem('auth_user') || sessionStorage.getItem('auth_user');
+    
     if (!token || !userStr) {
-      router.push('/auth');
+      router.push('/');
       return;
     }
     setAuthToken(token);
-    try { setAuthUser(JSON.parse(userStr)); } catch { router.push('/auth'); return; }
+    try { setAuthUser(JSON.parse(userStr)); } catch { router.push('/'); return; }
 
     // Validate token against backend /auth/me endpoint
     fetch(`${API_BASE}/auth/me`, {
@@ -109,7 +110,7 @@ const LegalAssistChat: React.FC = () => {
         localStorage.removeItem('auth_user');
         sessionStorage.removeItem('auth_token');
         sessionStorage.removeItem('auth_user');
-        router.push('/auth');
+        router.push('/');
       } else if (res.ok) {
         // Update user data from backend (in case it changed)
         res.json().then(user => {
@@ -144,7 +145,7 @@ const LegalAssistChat: React.FC = () => {
     localStorage.removeItem('auth_user');
     sessionStorage.removeItem('auth_token');
     sessionStorage.removeItem('auth_user');
-    router.push('/auth');
+    router.push('/');
   };
 
   const loadThreads = async () => {
