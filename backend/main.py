@@ -106,9 +106,10 @@ async def lifespan(app: FastAPI):
         pg_dsn += ("&" if "?" in pg_dsn else "?") + "sslmode=require"
 
     # Build a resilient connection pool that handles Neon serverless idle
-    # timeouts.  'max_idle' ensures stale connections are recycled, and
-    # 'keepalives' parameters keep the TCP connection alive so Neon does
-    # not silently close it.
+    # timeouts.  'max_idle' ensures stale connections are recycled.
+    # NOTE: Neon's pooled endpoint does NOT support tcp_keepalives_* via
+    # the 'options' startup parameter, so we use psycopg's native
+    # keepalives_idle/keepalives_interval/keepalives_count kwargs instead.
     pool_kwargs = dict(
         conninfo=pg_dsn,
         min_size=2,
@@ -117,8 +118,11 @@ async def lifespan(app: FastAPI):
         kwargs={
             "autocommit": True,
             "prepare_threshold": 0,
-            # TCP keepalive so Neon/NAT don't drop idle connections
-            "options": "-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=15 -c tcp_keepalives_count=4",
+            # TCP keepalive via libpq parameters (not startup options)
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 15,
+            "keepalives_count": 4,
         },
     )
 
