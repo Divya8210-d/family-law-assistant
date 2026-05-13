@@ -60,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_core.messages import HumanMessage, AIMessage
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg_pool import AsyncConnectionPool
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -84,8 +85,7 @@ async def lifespan(app: FastAPI):
     """
     Startup:
       1. Create application-level tables (threads, messages).
-      2. Initialise the AsyncPostgresSaver and create its tables
-         (checkpoints, checkpoint_writes).
+      2. Initialise the AsyncPostgresSaver with a resilient connection pool.
       3. Compile the LangGraph app with the checkpointer.
 
     Shutdown:
@@ -102,9 +102,27 @@ async def lifespan(app: FastAPI):
     # Convert: postgresql+asyncpg://... → postgresql://...
     pg_dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
 
-    async with AsyncPostgresSaver.from_conn_string(pg_dsn) as checkpointer:
+    # Build a resilient connection pool that handles Neon serverless idle
+    # timeouts.  'max_idle' ensures stale connections are recycled, and
+    # 'keepalives' parameters keep the TCP connection alive so Neon does
+    # not silently close it.
+    pool_kwargs = dict(
+        conninfo=pg_dsn,
+        min_size=2,
+        max_size=10,
+        max_idle=300,        # recycle idle connections every 5 min
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            # TCP keepalive so Neon/NAT don't drop idle connections
+            "options": "-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=15 -c tcp_keepalives_count=4",
+        },
+    )
+
+    async with AsyncConnectionPool(**pool_kwargs) as pool:
+        checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
-        logger.info("✅ LangGraph checkpointer tables ready")
+        logger.info("✅ LangGraph checkpointer tables ready (resilient pool)")
 
         # 3. Compile graph
         app.state.family_law_app = await create_graph(checkpointer)
@@ -380,13 +398,17 @@ async def chat_stream(
 
             # ── 3. Open event trace file ──────────────────────────────────────
             trace_path = os.path.join(TRACE_DIR, f"{thread_id}.log")
-            trace_file = open(trace_path, "a", encoding="utf-8")
+            trace_file = None
 
             def write_trace(event_type: str, payload):
-                trace_file.write(
-                    json.dumps({"ts": datetime.utcnow().isoformat(), "type": event_type, "payload": payload}, default=str) + "\n"
-                )
-                trace_file.flush()
+                if trace_file and not trace_file.closed:
+                    try:
+                        trace_file.write(
+                            json.dumps({"ts": datetime.utcnow().isoformat(), "type": event_type, "payload": payload}, default=str) + "\n"
+                        )
+                        trace_file.flush()
+                    except Exception:
+                        pass  # Don't let trace failures break the stream
 
             # ── 4. Stream graph events ────────────────────────────────────────
             accumulated_response   = ""
@@ -398,57 +420,62 @@ async def chat_stream(
 
             family_law_app = request.app.state.family_law_app
 
-            async for event in family_law_app.astream_events(
-                initial_state, config=graph_config, version="v2"
-            ):
-                write_trace("langgraph_event", event)
-                kind = event["event"]
+            try:
+                trace_file = open(trace_path, "a", encoding="utf-8")
 
-                # Clarification
-                if kind == "on_chain_end" and event.get("name") == "clarify":
-                    output       = event.get("data", {}).get("output", {})
-                    message_type = "clarification"
-                    response_text = output.get("response", "")
-                    accumulated_response = response_text
-                    yield f"data: {json.dumps({'type': 'clarification', 'content': response_text})}\n\n"
+                async for event in family_law_app.astream_events(
+                    initial_state, config=graph_config, version="v2"
+                ):
+                    write_trace("langgraph_event", event)
+                    kind = event["event"]
 
-                # Information gathering question
-                elif kind == "on_chain_end" and event.get("name") == "ask_question":
-                    output        = event.get("data", {}).get("output", {})
-                    message_type  = "information_gathering"
-                    response_text = output.get("response", "")
-                    info_collected = output.get("info_collected", {})
-                    info_needed    = output.get("info_needed", [])
-                    accumulated_response = response_text
-                    yield f"data: {json.dumps({'type': 'information_gathering', 'content': response_text, 'info_collected': info_collected, 'info_needed': info_needed})}\n\n"
+                    # Clarification
+                    if kind == "on_chain_end" and event.get("name") == "clarify":
+                        output       = event.get("data", {}).get("output", {})
+                        message_type = "clarification"
+                        response_text = output.get("response", "")
+                        accumulated_response = response_text
+                        yield f"data: {json.dumps({'type': 'clarification', 'content': response_text})}\n\n"
 
-                # Retrieval sources
-                elif kind == "on_chain_end" and event.get("name") == "retrieve":
-                    output  = event.get("data", {}).get("output", {})
-                    sources = output.get("sources", [])
-                    yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+                    # Information gathering question
+                    elif kind == "on_chain_end" and event.get("name") == "ask_question":
+                        output        = event.get("data", {}).get("output", {})
+                        message_type  = "information_gathering"
+                        response_text = output.get("response", "")
+                        info_collected = output.get("info_collected", {})
+                        info_needed    = output.get("info_needed", [])
+                        accumulated_response = response_text
+                        yield f"data: {json.dumps({'type': 'information_gathering', 'content': response_text, 'info_collected': info_collected, 'info_needed': info_needed})}\n\n"
 
-                # LLM token streaming (only from generate + gather_info nodes)
-                elif kind == "on_chat_model_stream" and event.get("metadata", {}).get("langgraph_node") in ("generate", "gather_info"):
-                    content = event["data"]["chunk"].content
-                    if content:
-                        message_type = "final_response"
-                        accumulated_response += content
-                        yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                    # Retrieval sources
+                    elif kind == "on_chain_end" and event.get("name") == "retrieve":
+                        output  = event.get("data", {}).get("output", {})
+                        sources = output.get("sources", [])
+                        yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
 
-                # Graph completed
-                elif kind == "on_chain_end" and event.get("name") == "LangGraph":
-                    output                 = event.get("data", {}).get("output", {})
-                    final_state            = output
-                    reasoning_steps        = output.get("reasoning_steps", [])
-                    precedent_explanations = output.get("precedent_explanations", [])
+                    # LLM token streaming (only from generate + gather_info nodes)
+                    elif kind == "on_chat_model_stream" and event.get("metadata", {}).get("langgraph_node") in ("generate", "gather_info"):
+                        content = event["data"]["chunk"].content
+                        if content:
+                            message_type = "final_response"
+                            accumulated_response += content
+                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
 
-                    if reasoning_steps:
-                        yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
-                    if precedent_explanations:
-                        yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
+                    # Graph completed
+                    elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                        output                 = event.get("data", {}).get("output", {})
+                        final_state            = output
+                        reasoning_steps        = output.get("reasoning_steps", [])
+                        precedent_explanations = output.get("precedent_explanations", [])
 
-            trace_file.close()
+                        if reasoning_steps:
+                            yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
+                        if precedent_explanations:
+                            yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
+
+            finally:
+                if trace_file and not trace_file.closed:
+                    trace_file.close()
 
             # ── 5. Schedule background save ───────────────────────────────────
             latency_ms   = int((time.time() - start_time) * 1000)
@@ -615,11 +642,32 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Basic health check."""
     return {
         "status":    "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version":   "3.0.0",
     }
+
+
+@app.get("/health/chat")
+async def chat_health_check():
+    """Deep health check — verifies chat dependencies are reachable."""
+    issues = []
+
+    # Check LangGraph app exists
+    if not hasattr(app.state, "family_law_app") or app.state.family_law_app is None:
+        issues.append("LangGraph app not initialized")
+
+    # Check Milvus collection
+    from nodes.retriever import collection as milvus_collection
+    if milvus_collection is None:
+        issues.append("Milvus collection not connected")
+
+    if issues:
+        return {"status": "degraded", "issues": issues, "timestamp": datetime.utcnow().isoformat()}
+
+    return {"status": "healthy", "chat_ready": True, "timestamp": datetime.utcnow().isoformat()}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

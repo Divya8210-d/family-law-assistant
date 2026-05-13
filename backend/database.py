@@ -39,6 +39,7 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
+    pool_recycle=300,    # recycle connections every 5 min (Neon idle timeout)
     echo=False,          # set True for SQL debug logs
 )
 
