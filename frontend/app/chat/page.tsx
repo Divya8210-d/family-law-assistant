@@ -269,12 +269,20 @@ const LegalAssistChat: React.FC = () => {
       let messageType: string | null = null;
       let reasoningSteps: ReasoningStep[] = [];
       let precedentExplanations: PrecedentExplanation[] = [];
+      let doneReceived = false;
+      let sseBuffer = '';  // Buffer for partial SSE lines
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        for (const line of decoder.decode(value).split('\n')) {
+        // Append new data to buffer to handle partial chunks
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        // Keep the last (possibly incomplete) line in the buffer
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           try {
             const data = JSON.parse(line.slice(6));
@@ -310,6 +318,7 @@ const LegalAssistChat: React.FC = () => {
             } else if (data.type === 'precedent_explanations') {
               precedentExplanations = data.explanations || [];
             } else if (data.type === 'done') {
+              doneReceived = true;
               messageType = data.message_type || 'final_response';
               if (accumulatedText) {
                 const msg: Message = {
@@ -339,6 +348,33 @@ const LegalAssistChat: React.FC = () => {
           } catch (e) { console.warn('Parse error', e); }
         }
       }
+
+      // ── FALLBACK: If stream ended without a 'done' event (e.g.
+      // Nginx proxy timeout), finalize the message with whatever
+      // data we've accumulated so we don't leave the UI hanging.
+      if (!doneReceived && accumulatedText) {
+        console.warn('SSE stream ended without done event — finalizing message');
+        const finalType = messageType || 'final_response';
+        const msg: Message = {
+          role: 'assistant',
+          content: accumulatedText,
+          timestamp: new Date(),
+          messageType: finalType as any,
+          reasoningSteps,
+          precedentExplanations,
+        };
+        if (finalType === 'information_gathering') {
+          msg.infoCollected = infoCollected;
+          msg.infoNeeded = infoNeeded;
+        }
+        setMessages(prev => [...prev, msg]);
+        setStreamingMessage('');
+        setConversationStatus(
+          finalType === 'final_response' ? 'completed' :
+            finalType === 'information_gathering' ? 'gathering_info' : 'clarifying'
+        );
+      }
+
       loadThreads();
     } catch (err) {
       console.error('Send failed:', err);

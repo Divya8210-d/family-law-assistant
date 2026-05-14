@@ -492,14 +492,22 @@ async def chat_stream(
                         sources = output.get("sources", [])
                         yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
 
-                    # LLM token streaming (only from generate + gather_info nodes)
-                    elif kind == "on_chat_model_stream" and event.get("metadata", {}).get("langgraph_node") in ("generate", "gather_info"):
-                        content = event["data"]["chunk"].content
-                        if content:
-                            message_type = "final_response"
-                            accumulated_response += content
-                            token_count += 1
-                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                    # LLM token streaming (from generate + gather_info nodes)
+                    elif kind == "on_chat_model_stream":
+                        node = event.get("metadata", {}).get("langgraph_node")
+                        if node in ("generate", "gather_info"):
+                            content = event["data"]["chunk"].content
+                            if content:
+                                message_type = "final_response"
+                                accumulated_response += content
+                                token_count += 1
+                                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                        elif node == "analyze_reasoning":
+                            # ── HEARTBEAT: analyze_reasoning makes slow
+                            # LLM calls.  Send SSE comments to prevent
+                            # Nginx proxy_read_timeout from closing the
+                            # connection during the long silence.
+                            yield ": heartbeat\n\n"
 
                     # ── FALLBACK: Capture response from generate node's
                     # on_chain_end.  When the sync node runs in a thread
@@ -517,22 +525,43 @@ async def chat_stream(
                             )
                             accumulated_response = generate_response_text
                             message_type = "final_response"
-                            # Send the full response as a single token event
-                            # so the frontend receives it
                             yield f"data: {json.dumps({'type': 'token', 'content': generate_response_text})}\n\n"
+
+                    # ── Capture reasoning + precedents immediately when
+                    # analyze_reasoning finishes, rather than waiting for
+                    # the final LangGraph on_chain_end.  This sends data
+                    # to the frontend before the SSE connection can time out.
+                    elif kind == "on_chain_end" and event.get("name") == "analyze_reasoning":
+                        output = event.get("data", {}).get("output", {})
+                        reasoning_steps        = output.get("reasoning_steps", reasoning_steps)
+                        precedent_explanations = output.get("precedent_explanations", precedent_explanations)
+                        logger.info(
+                            f"📊 analyze_reasoning done — "
+                            f"reasoning_steps={len(reasoning_steps)}  "
+                            f"precedent_explanations={len(precedent_explanations)}"
+                        )
+                        if reasoning_steps:
+                            yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
+                        if precedent_explanations:
+                            yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
 
                     # Graph completed
                     elif kind == "on_chain_end" and event.get("name") == "LangGraph":
-                        output                 = event.get("data", {}).get("output", {})
-                        final_state            = output
-                        reasoning_steps        = output.get("reasoning_steps", [])
-                        precedent_explanations = output.get("precedent_explanations", [])
+                        output      = event.get("data", {}).get("output", {})
+                        final_state = output
 
-                        # ── FINAL FALLBACK: If neither streaming tokens
-                        # nor the generate on_chain_end populated the
-                        # response, extract it from the final graph
-                        # output.  This covers edge cases where the
-                        # generate on_chain_end event name didn't match.
+                        # Pick up reasoning/precedents from graph output
+                        # if analyze_reasoning on_chain_end didn't fire
+                        if not reasoning_steps:
+                            reasoning_steps = output.get("reasoning_steps", [])
+                            if reasoning_steps:
+                                yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
+                        if not precedent_explanations:
+                            precedent_explanations = output.get("precedent_explanations", [])
+                            if precedent_explanations:
+                                yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
+
+                        # Response fallback from final graph state
                         if not accumulated_response.strip():
                             fallback_resp = output.get("response", "")
                             if fallback_resp:
@@ -543,11 +572,6 @@ async def chat_stream(
                                 accumulated_response = fallback_resp
                                 message_type = "final_response"
                                 yield f"data: {json.dumps({'type': 'token', 'content': fallback_resp})}\n\n"
-
-                        if reasoning_steps:
-                            yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
-                        if precedent_explanations:
-                            yield f"data: {json.dumps({'type': 'precedent_explanations', 'explanations': precedent_explanations})}\n\n"
 
             finally:
                 if trace_file and not trace_file.closed:
