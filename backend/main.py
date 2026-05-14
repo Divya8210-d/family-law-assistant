@@ -455,6 +455,7 @@ async def chat_stream(
             reasoning_steps        = []
             precedent_explanations = []
             final_state            = {}
+            token_count            = 0   # Track how many tokens we received via streaming
 
             family_law_app = request.app.state.family_law_app
 
@@ -497,7 +498,28 @@ async def chat_stream(
                         if content:
                             message_type = "final_response"
                             accumulated_response += content
+                            token_count += 1
                             yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+
+                    # ── FALLBACK: Capture response from generate node's
+                    # on_chain_end.  When the sync node runs in a thread
+                    # pool (common on production), on_chat_model_stream
+                    # events may never arrive.  This guarantees we have
+                    # the response text.
+                    elif kind == "on_chain_end" and event.get("name") == "generate":
+                        output = event.get("data", {}).get("output", {})
+                        generate_response_text = output.get("response", "")
+                        if generate_response_text and not accumulated_response.strip():
+                            logger.warning(
+                                "⚠️  No streaming tokens received from generate node — "
+                                "using on_chain_end response as fallback "
+                                f"({len(generate_response_text)} chars)"
+                            )
+                            accumulated_response = generate_response_text
+                            message_type = "final_response"
+                            # Send the full response as a single token event
+                            # so the frontend receives it
+                            yield f"data: {json.dumps({'type': 'token', 'content': generate_response_text})}\n\n"
 
                     # Graph completed
                     elif kind == "on_chain_end" and event.get("name") == "LangGraph":
@@ -505,6 +527,22 @@ async def chat_stream(
                         final_state            = output
                         reasoning_steps        = output.get("reasoning_steps", [])
                         precedent_explanations = output.get("precedent_explanations", [])
+
+                        # ── FINAL FALLBACK: If neither streaming tokens
+                        # nor the generate on_chain_end populated the
+                        # response, extract it from the final graph
+                        # output.  This covers edge cases where the
+                        # generate on_chain_end event name didn't match.
+                        if not accumulated_response.strip():
+                            fallback_resp = output.get("response", "")
+                            if fallback_resp:
+                                logger.warning(
+                                    "⚠️  Using final graph state 'response' as "
+                                    f"last-resort fallback ({len(fallback_resp)} chars)"
+                                )
+                                accumulated_response = fallback_resp
+                                message_type = "final_response"
+                                yield f"data: {json.dumps({'type': 'token', 'content': fallback_resp})}\n\n"
 
                         if reasoning_steps:
                             yield f"data: {json.dumps({'type': 'reasoning', 'steps': reasoning_steps})}\n\n"
@@ -514,6 +552,12 @@ async def chat_stream(
             finally:
                 if trace_file and not trace_file.closed:
                     trace_file.close()
+
+            logger.info(
+                f"📊 Stream stats — tokens_streamed={token_count}  "
+                f"response_len={len(accumulated_response)}  "
+                f"message_type={message_type}"
+            )
 
             # ── 5. Schedule background save ───────────────────────────────────
             latency_ms   = int((time.time() - start_time) * 1000)
