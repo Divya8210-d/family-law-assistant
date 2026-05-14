@@ -17,7 +17,6 @@ export default function AuthPage() {
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
-    const [remember, setRemember] = useState(false);
 
     // If already logged in, redirect to chat
     useEffect(() => {
@@ -62,15 +61,8 @@ export default function AuthPage() {
             }
 
             // Backend returns: { access_token, token_type, user: { id, email, full_name, gender } }
-            const storage = remember ? localStorage : sessionStorage;
-            storage.setItem('auth_token', data.access_token);
-            storage.setItem('auth_user', JSON.stringify(data.user));
-
-            // Also set in localStorage so chat page can find it
-            // (chat page checks localStorage first, then sessionStorage)
-            if (!remember) {
-                // For session-only, still put in sessionStorage — chat page will check both
-            }
+            localStorage.setItem('auth_token', data.access_token);
+            localStorage.setItem('auth_user', JSON.stringify(data.user));
 
             router.push('/chat');
         } catch {
@@ -238,33 +230,6 @@ border border-[#9e8453] overflow-hidden grid md:grid-cols-2">
                             </>
                         )}
 
-                        {/* Remember + Forgot */}
-                        <div className="flex items-center justify-between text-sm">
-                        
-
-                            {mode === 'signin' && (
-                                    <label className="flex items-center gap-2 text-[#8a7462] cursor-pointer">
-                                <input
-                                    type="checkbox"
-                                    checked={remember}
-                                    onChange={() => setRemember(!remember)}
-                                    className="accent-[#74603e]"
-                                />
-                                Remember me
-                            </label>
-                            )}
-
-                            
-
-                            {mode === 'signin' && (
-                                <button
-                                    type="button"
-                                    className="text-[#74603e] font-medium hover:text-[#5c4b2f]"
-                                >
-                                    Forgot password?
-                                </button>
-                            )}
-                        </div>
 
                         {/* Button */}
                         <button
